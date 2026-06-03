@@ -23,21 +23,13 @@ def sanitize_filename(filename):
     if not filename:
         return 'file'
     
-    # Extract just the filename (remove any path components)
-    # Handle both Windows (\) and Unix (/) path separators
     filename = os.path.basename(filename.replace('\\', '/'))
-    
-    # Remove or replace invalid characters for filenames
-    # Windows doesn't allow: < > : " / \ | ? *
-    # Also remove any control characters
     filename = re.sub(r'[<>:"|?*\\/\x00-\x1f]', '_', filename)
     
-    # Limit filename length (255 is common limit, leave room for prefix/suffix)
     if len(filename) > 200:
         name, ext = os.path.splitext(filename)
         filename = name[:200-len(ext)] + ext
     
-    # If filename becomes empty or just dots, use default
     if not filename or filename.strip('.') == '':
         return 'file'
     
@@ -117,25 +109,41 @@ def simulate_aes_gcm(plaintext_bytes, key, iv):
         }
     })
     
-    return {'steps': steps, 'encrypt_time': float(encrypt_time)}
+    return {
+        'steps': steps, 'encrypt_time': float(encrypt_time),
+        'ciphertext': base64.b64encode(encrypted_data).decode('utf-8'), 
+        'iv': iv.hex(), 'tag': tag.hex(), 'key': key.hex(),
+        'algorithm': 'AES', 'originalSize': len(plaintext_bytes), 'encryptedSize': len(encrypted_data)
+    }
 
 
 def simulate_rsa(plaintext_bytes):
     """Simulate RSA-OAEP encryption step by step"""
     steps = []
     
+    MAX_RSA_SIZE = 190
+    
     steps.append({
         'step': 1, 'name': 'Input Validation',
         'description': 'Verify plaintext size for RSA-2048',
         'data': {
-            'plaintext_length': len(plaintext_bytes), 'max_allowed': 190,
+            'plaintext_length': len(plaintext_bytes), 
+            'max_allowed': MAX_RSA_SIZE,
             'plaintext_preview': plaintext_bytes[:32].hex() + ('...' if len(plaintext_bytes) > 32 else ''),
-            'size_check': 'Valid' if len(plaintext_bytes) <= 190 else 'Too large'
+            'size_check': 'Valid' if len(plaintext_bytes) <= MAX_RSA_SIZE else 'Too large'
         }
     })
     
-    if len(plaintext_bytes) > 190:
-        return {'steps': steps, 'error': f'RSA can encrypt max 190 bytes, got {len(plaintext_bytes)}'}
+    if len(plaintext_bytes) > MAX_RSA_SIZE:
+        steps.append({
+            'step': 2, 'name': 'Error - Data Too Large',
+            'description': f'RSA cannot encrypt data larger than {MAX_RSA_SIZE} bytes',
+            'data': {
+                'error': f'Input size {len(plaintext_bytes)} bytes exceeds maximum {MAX_RSA_SIZE} bytes',
+                'recommendation': 'Use symmetric encryption (AES) for large files'
+            }
+        })
+        return {'steps': steps, 'error': f'RSA can encrypt max {MAX_RSA_SIZE} bytes, got {len(plaintext_bytes)}'}
     
     keygen_start = time.time()
     private_key = rsa.generate_private_key(65537, 2048, default_backend())
@@ -206,7 +214,12 @@ def simulate_rsa(plaintext_bytes):
     
     return {
         'steps': steps, 'keygen_time': float(keygen_time),
-        'encrypt_time': float(encrypt_time), 'encrypted_data': base64.b64encode(encrypted_data).decode('utf-8')
+        'encrypt_time': float(encrypt_time), 
+        'ciphertext': base64.b64encode(encrypted_data).decode('utf-8'),
+        'private_key': private_key.private_bytes(
+            encoding=serialization.Encoding.PEM, format=serialization.PrivateFormat.PKCS8, encryption_algorithm=serialization.NoEncryption()
+        ).decode('utf-8'),
+        'algorithm': 'RSA', 'originalSize': len(plaintext_bytes), 'encryptedSize': len(encrypted_data)
     }
 
 
@@ -422,9 +435,9 @@ def simulate_chacha20(plaintext_bytes, key, nonce):
         'step': 3, 'name': 'State Initialization',
         'description': 'Initialize 512-bit ChaCha20 state',
         'data': {
-            'state_size': '512 bits (16 words x 32 bits)',
-            'constants': '"expand 32-byte k" magic constants',
-            'counter_init': '0'
+            'state_blocks': '16 x 32-bit words',
+            'magic_const': 'expand 32-byte k magic',
+            'counter_val': '0'
         }
     })
     
@@ -433,7 +446,7 @@ def simulate_chacha20(plaintext_bytes, key, nonce):
         'description': 'ChaCha20 uses quarter-round mixing function',
         'data': {
             'operations': 'ADD, XOR, ROTATE',
-            'rounds': '20 (10 column rounds + 10 diagonal rounds)'
+            'total_rounds': '20 (10 column + 10 diagonal)',
         }
     })
     
@@ -445,7 +458,7 @@ def simulate_chacha20(plaintext_bytes, key, nonce):
         'step': 5, 'name': 'Keystream Generation',
         'description': 'Generate keystream and XOR with plaintext',
         'data': {
-            'cipher type': 'Stream cipher',
+            'cipher_type': 'Stream cipher',
             'operation': 'XOR plaintext with keystream',
             'time_ms': f"{encrypt_time:.4f}"
         }
@@ -514,7 +527,7 @@ def simulate_playfair(plaintext_str, key_str):
         }
     })
     
-    return {'steps': steps, 'ciphertext': ciphertext}
+    return {'steps': steps, 'ciphertext': ciphertext, 'key': key_str, 'algorithm': 'Playfair'}
 
 
 def simulate_hill(plaintext_str, key_matrix):
@@ -566,7 +579,7 @@ def simulate_hill(plaintext_str, key_matrix):
         }
     })
     
-    return {'steps': steps, 'ciphertext': ciphertext}
+    return {'steps': steps, 'ciphertext': ciphertext, 'keyMatrix': key_matrix, 'algorithm': 'Hill'}
 
 
 def simulate_vigenere(plaintext_str, key_str):
@@ -584,7 +597,6 @@ def simulate_vigenere(plaintext_str, key_str):
         }
     })
     
-    # Show first few shifts
     shifts = [ord(c) - ord('A') for c in cipher.key[:5]]
     steps.append({
         'step': 2, 'name': 'Calculate Shifts',
@@ -618,7 +630,7 @@ def simulate_vigenere(plaintext_str, key_str):
         }
     })
     
-    return {'steps': steps, 'ciphertext': ciphertext}
+    return {'steps': steps, 'ciphertext': ciphertext, 'key': key_str, 'algorithm': 'Vigenere'}
 
 
 def simulate_railfence(plaintext_str, rails1, rails2):
@@ -646,7 +658,6 @@ def simulate_railfence(plaintext_str, rails1, rails2):
         }
     })
     
-    # Do first pass manually for visualization
     temp = cipher._rail_fence_encrypt(plaintext_str.replace(' ', ''), rails1)
     
     steps.append({
@@ -679,7 +690,7 @@ def simulate_railfence(plaintext_str, rails1, rails2):
         }
     })
     
-    return {'steps': steps, 'ciphertext': ciphertext}
+    return {'steps': steps, 'ciphertext': ciphertext, 'rails1': rails1, 'rails2': rails2, 'algorithm': 'Double Rail Fence'}
 
 
 def simulate_columnar(plaintext_str, key1, key2):
@@ -716,7 +727,6 @@ def simulate_columnar(plaintext_str, key1, key2):
         }
     })
     
-    # Do first pass
     temp = cipher._columnar_encrypt(plaintext_str.replace(' ', '').upper(), cipher.order1, len(key1))
     
     steps.append({
@@ -748,7 +758,7 @@ def simulate_columnar(plaintext_str, key1, key2):
         }
     })
     
-    return {'steps': steps, 'ciphertext': ciphertext}
+    return {'steps': steps, 'ciphertext': ciphertext, 'key1': key1, 'key2': key2, 'algorithm': 'Double Columnar Transposition'}
 
 
 def simulate_ecc(plaintext_bytes):
@@ -868,7 +878,7 @@ def aes_endpoint():
             'tag': tag.hex(),
             'key': key.hex(),
             'encryptTime': f"{encrypt_time:.2f}",
-            'encrypted': base64.b64encode(ciphertext).decode('utf-8')
+            'ciphertext': base64.b64encode(ciphertext).decode('utf-8')
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
@@ -888,33 +898,49 @@ def aes_simulate():
         return jsonify({'success': False, 'error': str(e)})
 
 
-# RSA endpoint
+# RSA endpoint (FIXED)
 @app.route('/api/rsa', methods=['POST'])
 def rsa_endpoint():
     try:
         data = request.json
         input_bytes = base64.b64decode(data['data']) if data['type'] == 'file' else data['data'].encode('utf-8')
         
-        if len(input_bytes) > 190:
-            raise Exception(f"RSA max 190 bytes. Input: {len(input_bytes)} bytes")
+        MAX_RSA_SIZE = 190
+        
+        if len(input_bytes) > MAX_RSA_SIZE:
+            return jsonify({
+                'success': False, 
+                'error': f'RSA can only encrypt up to {MAX_RSA_SIZE} bytes. Your input is {len(input_bytes)} bytes. For larger files, please use symmetric encryption like AES.'
+            })
         
         keygen_start = time.time()
         private_key = rsa.generate_private_key(65537, 2048, default_backend())
         public_key = private_key.public_key()
         keygen_time = (time.time() - keygen_start) * 1000
         
+        start_time = time.time()
         encrypted_data = public_key.encrypt(input_bytes, padding.OAEP(
             mgf=padding.MGF1(algorithm=hashes.SHA256()),
             algorithm=hashes.SHA256(), label=None
         ))
+        encrypt_time = (time.time() - start_time) * 1000
+        
+        private_pem = private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption()
+        )
         
         return jsonify({
             'success': True,
+            'algorithm': 'RSA',
             'originalName': data['name'],
             'originalSize': data['size'],
             'encryptedSize': len(encrypted_data),
             'keygenTime': f"{keygen_time:.0f}",
-            'encrypted': base64.b64encode(encrypted_data).decode('utf-8')
+            'encryptTime': f"{encrypt_time:.2f}",
+            'ciphertext': base64.b64encode(encrypted_data).decode('utf-8'),
+            'private_key': private_pem.decode('utf-8')
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
@@ -925,6 +951,13 @@ def rsa_simulate():
     try:
         data = request.json
         input_bytes = base64.b64decode(data['data']) if data['type'] == 'file' else data['data'].encode('utf-8')
+        
+        MAX_RSA_SIZE = 190
+        if len(input_bytes) > MAX_RSA_SIZE:
+            return jsonify({
+                'success': False, 
+                'error': f'RSA can only encrypt up to {MAX_RSA_SIZE} bytes. Your input is {len(input_bytes)} bytes.'
+            })
         
         result = simulate_rsa(input_bytes)
         return jsonify({'success': True, **result})
@@ -949,12 +982,12 @@ def des_endpoint():
             'success': True,
             'algorithm': 'DES',
             'originalName': data['name'],
-            'original Size': data['size'],
+            'originalSize': data['size'],
             'encryptedSize': len(ciphertext),
             'key': key.hex(),
             'iv': iv.hex(),
             'encryptTime': f"{encrypt_time:.2f}",
-            'encrypted': base64.b64encode(ciphertext).decode('utf-8')
+            'ciphertext': base64.b64encode(ciphertext).decode('utf-8')
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
@@ -996,7 +1029,7 @@ def des3_endpoint():
             'key': key.hex(),
             'iv': iv.hex(),
             'encryptTime': f"{encrypt_time:.2f}",
-            'encrypted': base64.b64encode(ciphertext).decode('utf-8')
+            'ciphertext': base64.b64encode(ciphertext).decode('utf-8')
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
@@ -1038,7 +1071,7 @@ def blowfish_endpoint():
             'key': key.hex(),
             'iv': iv.hex(),
             'encryptTime': f"{encrypt_time:.2f}",
-            'encrypted': base64.b64encode(ciphertext).decode('utf-8')
+            'ciphertext': base64.b64encode(ciphertext).decode('utf-8')
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
@@ -1080,7 +1113,7 @@ def chacha20_endpoint():
             'key': key.hex(),
             'nonce': nonce.hex(),
             'encryptTime': f"{encrypt_time:.2f}",
-            'encrypted': base64.b64encode(ciphertext).decode('utf-8')
+            'ciphertext': base64.b64encode(ciphertext).decode('utf-8')
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
@@ -1100,12 +1133,20 @@ def chacha20_simulate():
         return jsonify({'success': False, 'error': str(e)})
 
 
-# Playfair endpoints
+# Playfair endpoints (FIXED - handle text properly)
 @app.route('/api/playfair', methods=['POST'])
 def playfair_endpoint():
     try:
         data = request.json
-        plaintext = data['data'] if data['type'] == 'text' else base64.b64decode(data['data']).decode('utf-8')
+        if data['type'] == 'file':
+            file_bytes = base64.b64decode(data['data'])
+            try:
+                plaintext = file_bytes.decode('utf-8')
+            except UnicodeDecodeError:
+                return jsonify({'success': False, 'error': 'Playfair cipher only works with text files (UTF-8 encoded)'})
+        else:
+            plaintext = data['data']
+        
         key = data.get('key', 'KEYWORD')
         
         cipher = classical.PlayfairCipher(key)
@@ -1117,9 +1158,11 @@ def playfair_endpoint():
             'success': True,
             'algorithm': 'Playfair',
             'originalName': data['name'],
+            'originalSize': len(plaintext),
+            'encryptedSize': len(ciphertext),
             'key': key,
             'encryptTime': f"{encrypt_time:.2f}",
-            'encrypted': ciphertext
+            'ciphertext': ciphertext
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
@@ -1129,7 +1172,15 @@ def playfair_endpoint():
 def playfair_simulate():
     try:
         data = request.json
-        plaintext = data['data'] if data['type'] == 'text' else base64.b64decode(data['data']).decode('utf-8')
+        if data['type'] == 'file':
+            file_bytes = base64.b64decode(data['data'])
+            try:
+                plaintext = file_bytes.decode('utf-8')
+            except UnicodeDecodeError:
+                return jsonify({'success': False, 'error': 'Playfair cipher only works with text files (UTF-8 encoded)'})
+        else:
+            plaintext = data['data']
+        
         key = data.get('key', 'KEYWORD')
         
         result = simulate_playfair(plaintext, key)
@@ -1138,12 +1189,20 @@ def playfair_simulate():
         return jsonify({'success': False, 'error': str(e)})
 
 
-# Hill endpoints
+# Hill endpoints (FIXED)
 @app.route('/api/hill', methods=['POST'])
 def hill_endpoint():
     try:
         data = request.json
-        plaintext = data['data'] if data['type'] == 'text' else base64.b64decode(data['data']).decode('utf-8')
+        if data['type'] == 'file':
+            file_bytes = base64.b64decode(data['data'])
+            try:
+                plaintext = file_bytes.decode('utf-8')
+            except UnicodeDecodeError:
+                return jsonify({'success': False, 'error': 'Hill cipher only works with text files (UTF-8 encoded)'})
+        else:
+            plaintext = data['data']
+        
         key_matrix = data.get('keyMatrix', [[3, 3], [2, 5]])
         
         cipher = classical.HillCipher(key_matrix)
@@ -1155,9 +1214,11 @@ def hill_endpoint():
             'success': True,
             'algorithm': 'Hill',
             'originalName': data['name'],
+            'originalSize': len(plaintext),
+            'encryptedSize': len(ciphertext),
             'keyMatrix': key_matrix,
             'encryptTime': f"{encrypt_time:.2f}",
-            'encrypted': ciphertext
+            'ciphertext': ciphertext
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
@@ -1167,7 +1228,15 @@ def hill_endpoint():
 def hill_simulate():
     try:
         data = request.json
-        plaintext = data['data'] if data['type'] == 'text' else base64.b64decode(data['data']).decode('utf-8')
+        if data['type'] == 'file':
+            file_bytes = base64.b64decode(data['data'])
+            try:
+                plaintext = file_bytes.decode('utf-8')
+            except UnicodeDecodeError:
+                return jsonify({'success': False, 'error': 'Hill cipher only works with text files (UTF-8 encoded)'})
+        else:
+            plaintext = data['data']
+        
         key_matrix = data.get('keyMatrix', [[3, 3], [2, 5]])
         
         result = simulate_hill(plaintext, key_matrix)
@@ -1176,12 +1245,20 @@ def hill_simulate():
         return jsonify({'success': False, 'error': str(e)})
 
 
-# Vigenère endpoints
+# Vigenère endpoints (FIXED)
 @app.route('/api/vigenere', methods=['POST'])
 def vigenere_endpoint():
     try:
         data = request.json
-        plaintext = data['data'] if data['type'] == 'text' else base64.b64decode(data['data']).decode('utf-8')
+        if data['type'] == 'file':
+            file_bytes = base64.b64decode(data['data'])
+            try:
+                plaintext = file_bytes.decode('utf-8')
+            except UnicodeDecodeError:
+                return jsonify({'success': False, 'error': 'Vigenère cipher only works with text files (UTF-8 encoded)'})
+        else:
+            plaintext = data['data']
+        
         key = data.get('key', 'SECRET')
         
         cipher = classical.VigenereCipher(key)
@@ -1193,9 +1270,11 @@ def vigenere_endpoint():
             'success': True,
             'algorithm': 'Vigenere',
             'originalName': data['name'],
+            'originalSize': len(plaintext),
+            'encryptedSize': len(ciphertext),
             'key': key,
             'encryptTime': f"{encrypt_time:.2f}",
-            'encrypted': ciphertext
+            'ciphertext': ciphertext
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
@@ -1205,7 +1284,15 @@ def vigenere_endpoint():
 def vigenere_simulate():
     try:
         data = request.json
-        plaintext = data['data'] if data['type'] == 'text' else base64.b64decode(data['data']).decode('utf-8')
+        if data['type'] == 'file':
+            file_bytes = base64.b64decode(data['data'])
+            try:
+                plaintext = file_bytes.decode('utf-8')
+            except UnicodeDecodeError:
+                return jsonify({'success': False, 'error': 'Vigenère cipher only works with text files (UTF-8 encoded)'})
+        else:
+            plaintext = data['data']
+        
         key = data.get('key', 'SECRET')
         
         result = simulate_vigenere(plaintext, key)
@@ -1214,12 +1301,20 @@ def vigenere_simulate():
         return jsonify({'success': False, 'error': str(e)})
 
 
-# Rail Fence endpoints
+# Rail Fence endpoints (FIXED)
 @app.route('/api/railfence', methods=['POST'])
 def railfence_endpoint():
     try:
         data = request.json
-        plaintext = data['data'] if data['type'] == 'text' else base64.b64decode(data['data']).decode('utf-8')
+        if data['type'] == 'file':
+            file_bytes = base64.b64decode(data['data'])
+            try:
+                plaintext = file_bytes.decode('utf-8')
+            except UnicodeDecodeError:
+                return jsonify({'success': False, 'error': 'Rail Fence cipher only works with text files (UTF-8 encoded)'})
+        else:
+            plaintext = data['data']
+        
         rails1 = data.get('rails1', 3)
         rails2 = data.get('rails2', 4)
         
@@ -1232,10 +1327,12 @@ def railfence_endpoint():
             'success': True,
             'algorithm': 'Double Rail Fence',
             'originalName': data['name'],
+            'originalSize': len(plaintext),
+            'encryptedSize': len(ciphertext),
             'rails1': rails1,
             'rails2': rails2,
             'encryptTime': f"{encrypt_time:.2f}",
-            'encrypted': ciphertext
+            'ciphertext': ciphertext
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
@@ -1245,7 +1342,15 @@ def railfence_endpoint():
 def railfence_simulate():
     try:
         data = request.json
-        plaintext = data['data'] if data['type'] == 'text' else base64.b64encode(data['data']).decode('utf-8')
+        if data['type'] == 'file':
+            file_bytes = base64.b64decode(data['data'])
+            try:
+                plaintext = file_bytes.decode('utf-8')
+            except UnicodeDecodeError:
+                return jsonify({'success': False, 'error': 'Rail Fence cipher only works with text files (UTF-8 encoded)'})
+        else:
+            plaintext = data['data']
+        
         rails1 = data.get('rails1', 3)
         rails2 = data.get('rails2', 4)
         
@@ -1255,12 +1360,20 @@ def railfence_simulate():
         return jsonify({'success': False, 'error': str(e)})
 
 
-# Columnar endpoints
+# Columnar endpoints (FIXED)
 @app.route('/api/columnar', methods=['POST'])
 def columnar_endpoint():
     try:
         data = request.json
-        plaintext = data['data'] if data['type'] == 'text' else base64.b64decode(data['data']).decode('utf-8')
+        if data['type'] == 'file':
+            file_bytes = base64.b64decode(data['data'])
+            try:
+                plaintext = file_bytes.decode('utf-8')
+            except UnicodeDecodeError:
+                return jsonify({'success': False, 'error': 'Columnar cipher only works with text files (UTF-8 encoded)'})
+        else:
+            plaintext = data['data']
+        
         key1 = data.get('key1', 'HACK')
         key2 = data.get('key2', 'CRYPTO')
         
@@ -1273,10 +1386,12 @@ def columnar_endpoint():
             'success': True,
             'algorithm': 'Double Columnar Transposition',
             'originalName': data['name'],
+            'originalSize': len(plaintext),
+            'encryptedSize': len(ciphertext),
             'key1': key1,
             'key2': key2,
             'encryptTime': f"{encrypt_time:.2f}",
-            'encrypted': ciphertext
+            'ciphertext': ciphertext
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
@@ -1286,7 +1401,15 @@ def columnar_endpoint():
 def columnar_simulate():
     try:
         data = request.json
-        plaintext = data['data'] if data['type'] == 'text' else base64.b64decode(data['data']).decode('utf-8')
+        if data['type'] == 'file':
+            file_bytes = base64.b64decode(data['data'])
+            try:
+                plaintext = file_bytes.decode('utf-8')
+            except UnicodeDecodeError:
+                return jsonify({'success': False, 'error': 'Columnar cipher only works with text files (UTF-8 encoded)'})
+        else:
+            plaintext = data['data']
+        
         key1 = data.get('key1', 'HACK')
         key2 = data.get('key2', 'CRYPTO')
         
@@ -1296,7 +1419,7 @@ def columnar_simulate():
         return jsonify({'success': False, 'error': str(e)})
 
 
-# ECC endpoints
+# ECC endpoints (FIXED - bytes serialization)
 @app.route('/api/ecc', methods=['POST'])
 def ecc_endpoint():
     try:
@@ -1309,17 +1432,24 @@ def ecc_endpoint():
         encrypted_data = ecc.encrypt_ecc(input_bytes, public_key)
         encrypt_time = (time.time() - start_time) * 1000
         
+        private_pem = private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption()
+        )
+        
         return jsonify({
             'success': True,
             'algorithm': 'ECC (ECIES)',
             'originalName': data['name'],
             'originalSize': data['size'],
             'encryptedSize': len(encrypted_data['ciphertext']),
-            'ephemeralPublicKey': encrypted_data['ephemeral_public_key'].hex(),
+            'ephemeral_public_key': encrypted_data['ephemeral_public_key'].hex(),
             'iv': encrypted_data['iv'].hex(),
             'tag': encrypted_data['tag'].hex(),
             'encryptTime': f"{encrypt_time:.2f}",
-            'encrypted': base64.b64encode(encrypted_data['ciphertext']).decode('utf-8')
+            'ciphertext': base64.b64encode(encrypted_data['ciphertext']).decode('utf-8'),
+            'private_key': private_pem.decode('utf-8')
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
@@ -1332,12 +1462,32 @@ def ecc_simulate():
         input_bytes = base64.b64decode(data['data']) if data['type'] == 'file' else data['data'].encode('utf-8')
         
         result = simulate_ecc(input_bytes)
+        
+        if 'private_key' in result:
+            private_pem = result['private_key'].private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.PKCS8,
+                encryption_algorithm=serialization.NoEncryption()
+            )
+            result['private_key_pem'] = private_pem.decode('utf-8')
+            del result['private_key']
+        
+        if 'encrypted_data' in result:
+            enc_data = result['encrypted_data']
+            result['ephemeral_public_key'] = enc_data['ephemeral_public_key'].hex()
+            result['iv'] = enc_data['iv'].hex()
+            result['tag'] = enc_data['tag'].hex()
+            result['ciphertext'] = base64.b64encode(enc_data['ciphertext']).decode('utf-8')
+            result['private_key'] = result['private_key_pem']
+            result['algorithm'] = 'ECC (ECIES)'
+            del result['encrypted_data']
+        
         return jsonify({'success': True, **result})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
 
 
-# Decryption endpoints - Individual algorithm endpoints
+# Decryption endpoints
 @app.route('/api/decrypt-aes', methods=['POST'])
 def decrypt_aes():
     try:
@@ -1353,7 +1503,6 @@ def decrypt_aes():
         plaintext = aes.decrypt_gcm(ciphertext, key, iv, tag)
         decrypt_time = (time.time() - start_time) * 1000
         
-        # Try to decode as text
         try:
             plaintext_text = plaintext.decode('utf-8')
             is_text = True
@@ -1367,7 +1516,7 @@ def decrypt_aes():
             'isText': is_text,
             'size': len(plaintext),
             'decryptTime': f"{decrypt_time:.2f}",
-            'originalName': 'decrypted_file'
+            'originalName': encrypted_file.get('originalName', 'decrypted_file')
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
@@ -1382,7 +1531,6 @@ def decrypt_rsa():
         ciphertext = base64.b64decode(encrypted_file['ciphertext'])
         private_key_pem = encrypted_file['private_key'].encode('utf-8')
         
-        # Load private key
         private_key = serialization.load_pem_private_key(
             private_key_pem,
             password=None,
@@ -1396,7 +1544,6 @@ def decrypt_rsa():
         ))
         decrypt_time = (time.time() - start_time) * 1000
         
-        # Try to decode as text
         try:
             plaintext_text = plaintext.decode('utf-8')
             is_text = True
@@ -1410,7 +1557,7 @@ def decrypt_rsa():
             'isText': is_text,
             'size': len(plaintext),
             'decryptTime': f"{decrypt_time:.2f}",
-            'originalName': 'decrypted_file'
+            'originalName': encrypted_file.get('originalName', 'decrypted_file')
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
@@ -1430,7 +1577,6 @@ def decrypt_des():
         plaintext = symmetric.decrypt_des(ciphertext, key, iv)
         decrypt_time = (time.time() - start_time) * 1000
         
-        # Try to decode as text
         try:
             plaintext_text = plaintext.decode('utf-8')
             is_text = True
@@ -1444,7 +1590,7 @@ def decrypt_des():
             'isText': is_text,
             'size': len(plaintext),
             'decryptTime': f"{decrypt_time:.2f}",
-            'originalName': 'decrypted_file'
+            'originalName': encrypted_file.get('originalName', 'decrypted_file')
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
@@ -1464,7 +1610,6 @@ def decrypt_3des():
         plaintext = symmetric.decrypt_3des(ciphertext, key, iv)
         decrypt_time = (time.time() - start_time) * 1000
         
-        # Try to decode as text
         try:
             plaintext_text = plaintext.decode('utf-8')
             is_text = True
@@ -1478,7 +1623,7 @@ def decrypt_3des():
             'isText': is_text,
             'size': len(plaintext),
             'decryptTime': f"{decrypt_time:.2f}",
-            'originalName': 'decrypted_file'
+            'originalName': encrypted_file.get('originalName', 'decrypted_file')
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
@@ -1498,7 +1643,6 @@ def decrypt_blowfish():
         plaintext = symmetric.decrypt_blowfish(ciphertext, key, iv)
         decrypt_time = (time.time() - start_time) * 1000
         
-        # Try to decode as text
         try:
             plaintext_text = plaintext.decode('utf-8')
             is_text = True
@@ -1512,7 +1656,7 @@ def decrypt_blowfish():
             'isText': is_text,
             'size': len(plaintext),
             'decryptTime': f"{decrypt_time:.2f}",
-            'originalName': 'decrypted_file'
+            'originalName': encrypted_file.get('originalName', 'decrypted_file')
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
@@ -1532,7 +1676,6 @@ def decrypt_chacha20():
         plaintext = symmetric.decrypt_chacha20(ciphertext, key, nonce)
         decrypt_time = (time.time() - start_time) * 1000
         
-        # Try to decode as text
         try:
             plaintext_text = plaintext.decode('utf-8')
             is_text = True
@@ -1546,7 +1689,7 @@ def decrypt_chacha20():
             'isText': is_text,
             'size': len(plaintext),
             'decryptTime': f"{decrypt_time:.2f}",
-            'originalName': 'decrypted_file'
+            'originalName': encrypted_file.get('originalName', 'decrypted_file')
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
@@ -1572,7 +1715,7 @@ def decrypt_playfair():
             'isText': True,
             'size': len(plaintext),
             'decryptTime': f"{decrypt_time:.2f}",
-            'originalName': 'decrypted_file'
+            'originalName': encrypted_file.get('originalName', 'decrypted_file')
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
@@ -1598,7 +1741,7 @@ def decrypt_hill():
             'isText': True,
             'size': len(plaintext),
             'decryptTime': f"{decrypt_time:.2f}",
-            'originalName': 'decrypted_file'
+            'originalName': encrypted_file.get('originalName', 'decrypted_file')
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
@@ -1624,7 +1767,7 @@ def decrypt_vigenere():
             'isText': True,
             'size': len(plaintext),
             'decryptTime': f"{decrypt_time:.2f}",
-            'originalName': 'decrypted_file'
+            'originalName': encrypted_file.get('originalName', 'decrypted_file')
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
@@ -1637,8 +1780,8 @@ def decrypt_railfence():
         encrypted_file = json.loads(data['encryptedFile'])
         
         ciphertext = encrypted_file['ciphertext']
-        rails1 = encrypted_file['rails1']
-        rails2 = encrypted_file['rails2']
+        rails1 = int(encrypted_file['rails1'])
+        rails2 = int(encrypted_file['rails2'])
         
         cipher = classical.DoubleRailFenceCipher(rails1, rails2)
         start_time = time.time()
@@ -1651,7 +1794,7 @@ def decrypt_railfence():
             'isText': True,
             'size': len(plaintext),
             'decryptTime': f"{decrypt_time:.2f}",
-            'originalName': 'decrypted_file'
+            'originalName': encrypted_file.get('originalName', 'decrypted_file')
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
@@ -1678,7 +1821,7 @@ def decrypt_columnar():
             'isText': True,
             'size': len(plaintext),
             'decryptTime': f"{decrypt_time:.2f}",
-            'originalName': 'decrypted_file'
+            'originalName': encrypted_file.get('originalName', 'decrypted_file')
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
@@ -1696,7 +1839,6 @@ def decrypt_ecc():
         tag = bytes.fromhex(encrypted_file['tag'])
         private_key_pem = encrypted_file['private_key'].encode('utf-8')
         
-        # Load private key
         private_key = serialization.load_pem_private_key(
             private_key_pem,
             password=None,
@@ -1714,7 +1856,6 @@ def decrypt_ecc():
         plaintext = ecc.decrypt_ecc(encrypted_data, private_key)
         decrypt_time = (time.time() - start_time) * 1000
         
-        # Try to decode as text
         try:
             plaintext_text = plaintext.decode('utf-8')
             is_text = True
@@ -1728,17 +1869,22 @@ def decrypt_ecc():
             'isText': is_text,
             'size': len(plaintext),
             'decryptTime': f"{decrypt_time:.2f}",
-            'originalName': 'decrypted_file'
+            'originalName': encrypted_file.get('originalName', 'decrypted_file')
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
 
 
-# Generic decrypt endpoint (kept for backward compatibility)
+# Generic decrypt endpoint
 @app.route('/api/decrypt', methods=['POST'])
 def decrypt_endpoint():
     try:
         data = request.json
+        
+        # Unpack the encryptedFile wrapper if present (used by frontend uploads)
+        if 'encryptedFile' in data and isinstance(data['encryptedFile'], str):
+            data = json.loads(data['encryptedFile'])
+            
         algorithm = data['algorithm']
         
         if algorithm == 'AES':
@@ -1773,7 +1919,7 @@ def decrypt_endpoint():
         elif algorithm == 'ChaCha20':
             ciphertext = base64.b64decode(data['ciphertext'])
             key = bytes.fromhex(data['key'])
-            nonce = bytes.fromhex(data['nonce'])
+            nonce = bytes.fromhex(data.get('nonce', data.get('iv', '')))
             
             plaintext = symmetric.decrypt_chacha20(ciphertext, key, nonce)
             
@@ -1800,8 +1946,8 @@ def decrypt_endpoint():
             
         elif algorithm == 'Double Rail Fence':
             ciphertext = data['ciphertext']
-            rails1 = data['rails1']
-            rails2 = data['rails2']
+            rails1 = int(data['rails1'])
+            rails2 = int(data['rails2'])
             
             cipher = classical.DoubleRailFenceCipher(rails1, rails2)
             plaintext = cipher.decrypt(ciphertext).encode('utf-8')
@@ -1814,10 +1960,35 @@ def decrypt_endpoint():
             cipher = classical.DoubleColumnarTransposition(key1, key2)
             plaintext = cipher.decrypt(ciphertext).encode('utf-8')
             
+        elif algorithm == 'RSA':
+            ciphertext = base64.b64decode(data['ciphertext'])
+            private_key = serialization.load_pem_private_key(
+                data['private_key'].encode('utf-8'), password=None, backend=default_backend()
+            )
+            plaintext = private_key.decrypt(ciphertext, padding.OAEP(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(), label=None
+            ))
+
+        elif algorithm in ['ECC', 'ECC (ECIES)']:
+            ciphertext = base64.b64decode(data['ciphertext'])
+            ephemeral_public_key = bytes.fromhex(data['ephemeral_public_key'])
+            iv = bytes.fromhex(data['iv'])
+            tag = bytes.fromhex(data['tag'])
+            private_key = serialization.load_pem_private_key(
+                data['private_key'].encode('utf-8'), password=None, backend=default_backend()
+            )
+            encrypted_data = {
+                'ciphertext': ciphertext,
+                'ephemeral_public_key': ephemeral_public_key,
+                'iv': iv,
+                'tag': tag
+            }
+            plaintext = ecc.decrypt_ecc(encrypted_data, private_key)
+
         else:
             return jsonify({'success': False, 'error': f'Unknown algorithm: {algorithm}'})
         
-        # Try to decode as text
         try:
             plaintext_text = plaintext.decode('utf-8')
             is_text = True
@@ -1846,13 +2017,13 @@ def download_aes_binary():
         
         ciphertext, tag = aes.encrypt_gcm(input_bytes, key, iv)
         
-        # Create a binary package with all necessary data
         binary_data = json.dumps({
             'algorithm': 'AES',
             'ciphertext': base64.b64encode(ciphertext).decode('utf-8'),
             'key': key.hex(),
             'iv': iv.hex(),
-            'tag': tag.hex()
+            'tag': tag.hex(),
+            'originalName': data.get('name', 'file')
         }).encode('utf-8')
         
         safe_name = sanitize_filename(data.get('name', 'file'))
@@ -1874,8 +2045,12 @@ def download_rsa_binary():
         data = request.json
         input_bytes = base64.b64decode(data['data']) if data['type'] == 'file' else data['data'].encode('utf-8')
         
-        if len(input_bytes) > 190:
-            raise Exception(f"RSA max 190 bytes. Input: {len(input_bytes)} bytes")
+        MAX_RSA_SIZE = 190
+        if len(input_bytes) > MAX_RSA_SIZE:
+            return jsonify({
+                'success': False, 
+                'error': f'RSA can only encrypt up to {MAX_RSA_SIZE} bytes. Your input is {len(input_bytes)} bytes.'
+            }), 400
         
         private_key = rsa.generate_private_key(65537, 2048, default_backend())
         public_key = private_key.public_key()
@@ -1894,7 +2069,8 @@ def download_rsa_binary():
         binary_data = json.dumps({
             'algorithm': 'RSA',
             'ciphertext': base64.b64encode(encrypted_data).decode('utf-8'),
-            'private_key': private_pem.decode('utf-8')
+            'private_key': private_pem.decode('utf-8'),
+            'originalName': data.get('name', 'file')
         }).encode('utf-8')
         
         safe_name = sanitize_filename(data.get('name', 'file'))
@@ -1924,7 +2100,8 @@ def download_des_binary():
             'algorithm': 'DES',
             'ciphertext': base64.b64encode(ciphertext).decode('utf-8'),
             'key': key.hex(),
-            'iv': iv.hex()
+            'iv': iv.hex(),
+            'originalName': data.get('name', 'file')
         }).encode('utf-8')
         
         safe_name = sanitize_filename(data.get('name', 'file'))
@@ -1954,7 +2131,8 @@ def download_3des_binary():
             'algorithm': '3DES',
             'ciphertext': base64.b64encode(ciphertext).decode('utf-8'),
             'key': key.hex(),
-            'iv': iv.hex()
+            'iv': iv.hex(),
+            'originalName': data.get('name', 'file')
         }).encode('utf-8')
         
         safe_name = sanitize_filename(data.get('name', 'file'))
@@ -1984,7 +2162,8 @@ def download_blowfish_binary():
             'algorithm': 'Blowfish',
             'ciphertext': base64.b64encode(ciphertext).decode('utf-8'),
             'key': key.hex(),
-            'iv': iv.hex()
+            'iv': iv.hex(),
+            'originalName': data.get('name', 'file')
         }).encode('utf-8')
         
         safe_name = sanitize_filename(data.get('name', 'file'))
@@ -2014,7 +2193,8 @@ def download_chacha20_binary():
             'algorithm': 'ChaCha20',
             'ciphertext': base64.b64encode(ciphertext).decode('utf-8'),
             'key': key.hex(),
-            'nonce': nonce.hex()
+            'nonce': nonce.hex(),
+            'originalName': data.get('name', 'file')
         }).encode('utf-8')
         
         safe_name = sanitize_filename(data.get('name', 'file'))
@@ -2034,7 +2214,15 @@ def download_chacha20_binary():
 def download_playfair_binary():
     try:
         data = request.json
-        plaintext = data['data'] if data['type'] == 'text' else base64.b64decode(data['data']).decode('utf-8')
+        if data['type'] == 'file':
+            file_bytes = base64.b64decode(data['data'])
+            try:
+                plaintext = file_bytes.decode('utf-8')
+            except UnicodeDecodeError:
+                return jsonify({'success': False, 'error': 'Playfair cipher only works with text files'}), 400
+        else:
+            plaintext = data['data']
+        
         key = data.get('key', 'KEYWORD')
         
         cipher = classical.PlayfairCipher(key)
@@ -2043,7 +2231,8 @@ def download_playfair_binary():
         binary_data = json.dumps({
             'algorithm': 'Playfair',
             'ciphertext': ciphertext,
-            'key': key
+            'key': key,
+            'originalName': data.get('name', 'file')
         }).encode('utf-8')
         
         safe_name = sanitize_filename(data.get('name', 'file'))
@@ -2063,7 +2252,15 @@ def download_playfair_binary():
 def download_hill_binary():
     try:
         data = request.json
-        plaintext = data['data'] if data['type'] == 'text' else base64.b64decode(data['data']).decode('utf-8')
+        if data['type'] == 'file':
+            file_bytes = base64.b64decode(data['data'])
+            try:
+                plaintext = file_bytes.decode('utf-8')
+            except UnicodeDecodeError:
+                return jsonify({'success': False, 'error': 'Hill cipher only works with text files'}), 400
+        else:
+            plaintext = data['data']
+        
         key_matrix = data.get('keyMatrix', [[3, 3], [2, 5]])
         
         cipher = classical.HillCipher(key_matrix)
@@ -2072,7 +2269,8 @@ def download_hill_binary():
         binary_data = json.dumps({
             'algorithm': 'Hill',
             'ciphertext': ciphertext,
-            'keyMatrix': key_matrix
+            'keyMatrix': key_matrix,
+            'originalName': data.get('name', 'file')
         }).encode('utf-8')
         
         safe_name = sanitize_filename(data.get('name', 'file'))
@@ -2092,7 +2290,15 @@ def download_hill_binary():
 def download_vigenere_binary():
     try:
         data = request.json
-        plaintext = data['data'] if data['type'] == 'text' else base64.b64decode(data['data']).decode('utf-8')
+        if data['type'] == 'file':
+            file_bytes = base64.b64decode(data['data'])
+            try:
+                plaintext = file_bytes.decode('utf-8')
+            except UnicodeDecodeError:
+                return jsonify({'success': False, 'error': 'Vigenère cipher only works with text files'}), 400
+        else:
+            plaintext = data['data']
+        
         key = data.get('key', 'SECRET')
         
         cipher = classical.VigenereCipher(key)
@@ -2101,7 +2307,8 @@ def download_vigenere_binary():
         binary_data = json.dumps({
             'algorithm': 'Vigenere',
             'ciphertext': ciphertext,
-            'key': key
+            'key': key,
+            'originalName': data.get('name', 'file')
         }).encode('utf-8')
         
         safe_name = sanitize_filename(data.get('name', 'file'))
@@ -2121,7 +2328,15 @@ def download_vigenere_binary():
 def download_railfence_binary():
     try:
         data = request.json
-        plaintext = data['data'] if data['type'] == 'text' else base64.b64decode(data['data']).decode('utf-8')
+        if data['type'] == 'file':
+            file_bytes = base64.b64decode(data['data'])
+            try:
+                plaintext = file_bytes.decode('utf-8')
+            except UnicodeDecodeError:
+                return jsonify({'success': False, 'error': 'Rail Fence cipher only works with text files'}), 400
+        else:
+            plaintext = data['data']
+        
         rails1 = data.get('rails1', 3)
         rails2 = data.get('rails2', 4)
         
@@ -2132,7 +2347,8 @@ def download_railfence_binary():
             'algorithm': 'Double Rail Fence',
             'ciphertext': ciphertext,
             'rails1': rails1,
-            'rails2': rails2
+            'rails2': rails2,
+            'originalName': data.get('name', 'file')
         }).encode('utf-8')
         
         safe_name = sanitize_filename(data.get('name', 'file'))
@@ -2152,7 +2368,15 @@ def download_railfence_binary():
 def download_columnar_binary():
     try:
         data = request.json
-        plaintext = data['data'] if data['type'] == 'text' else base64.b64decode(data['data']).decode('utf-8')
+        if data['type'] == 'file':
+            file_bytes = base64.b64decode(data['data'])
+            try:
+                plaintext = file_bytes.decode('utf-8')
+            except UnicodeDecodeError:
+                return jsonify({'success': False, 'error': 'Columnar cipher only works with text files'}), 400
+        else:
+            plaintext = data['data']
+        
         key1 = data.get('key1', 'HACK')
         key2 = data.get('key2', 'CRYPTO')
         
@@ -2163,7 +2387,8 @@ def download_columnar_binary():
             'algorithm': 'Double Columnar Transposition',
             'ciphertext': ciphertext,
             'key1': key1,
-            'key2': key2
+            'key2': key2,
+            'originalName': data.get('name', 'file')
         }).encode('utf-8')
         
         safe_name = sanitize_filename(data.get('name', 'file'))
@@ -2188,7 +2413,6 @@ def download_ecc_binary():
         private_key, public_key = ecc.generate_ecc_keypair()
         encrypted_data = ecc.encrypt_ecc(input_bytes, public_key)
         
-        # Serialize private key for decryption
         private_pem = private_key.private_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PrivateFormat.PKCS8,
@@ -2201,7 +2425,8 @@ def download_ecc_binary():
             'ephemeral_public_key': encrypted_data['ephemeral_public_key'].hex(),
             'iv': encrypted_data['iv'].hex(),
             'tag': encrypted_data['tag'].hex(),
-            'private_key': private_pem.decode('utf-8')
+            'private_key': private_pem.decode('utf-8'),
+            'originalName': data.get('name', 'file')
         }).encode('utf-8')
         
         safe_name = sanitize_filename(data.get('name', 'file'))
@@ -2225,7 +2450,6 @@ def download_decrypted():
         is_text = data.get('isText', True)
         original_name = data.get('originalName', 'file')
         
-        # If it's text, use it directly; if binary, decode from base64
         safe_name = sanitize_filename(original_name) if original_name else 'file'
         if is_text:
             file_data = plaintext.encode('utf-8')
